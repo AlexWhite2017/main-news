@@ -1,10 +1,10 @@
 import os
 import logging
 import requests
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from bs4 import BeautifulSoup
-import asyncio
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.requests import Request
@@ -27,147 +27,283 @@ WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL", "") + "/webhook"
 application = Application.builder().token(TOKEN).build()
 
 class NewsParser:
-    """Парсер новостей из популярных российских источников"""
+    """Улучшенный парсер новостей с резервными источниками"""
     
     def __init__(self):
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
+        logger.info("🔄 Инициализирован улучшенный парсер новостей")
     
     def parse_ria_news(self, max_news: int = 5) -> list:
-        """Парсинг новостей с RIA.ru - федеральные новости"""
+        """Парсинг новостей с RIA.ru"""
         try:
             url = "https://ria.ru/"
-            response = requests.get(url, headers=self.headers, timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            response = requests.get(url, headers=self.headers, timeout=15)
+            response.raise_for_status()
             
+            soup = BeautifulSoup(response.text, 'html.parser')
             news_items = []
-            # Современные селекторы для RIA.ru
-            articles = soup.select('a.cell-list__item-link, a.list-item__content')[:max_news]
+            
+            # Универсальные селекторы для RIA
+            articles = soup.select('[data-type="article"], .cell-list__item, .list-item, article')[:max_news*2]
             
             for article in articles:
                 try:
-                    title_elem = article.select_one('.cell-list__item-title, .list-item__title')
-                    if title_elem:
-                        title = title_elem.get_text(strip=True)
-                        link = article.get('href', '')
+                    title_elem = article.select_one('.cell-list__item-title, .list-item__title, h2, h3')
+                    if not title_elem:
+                        continue
+                    
+                    title = title_elem.get_text(strip=True)
+                    if len(title) < 10:
+                        continue
+                    
+                    link_elem = article.find('a', href=True)
+                    if link_elem:
+                        link = link_elem['href']
                         if link and not link.startswith('http'):
                             link = 'https://ria.ru' + link
+                    else:
+                        continue
+                    
+                    news_items.append({
+                        'title': title[:150],
+                        'link': link,
+                        'source': 'RIA Новости'
+                    })
+                    
+                    if len(news_items) >= max_news:
+                        break
                         
-                        news_items.append({
-                            'title': title,
-                            'link': link,
-                            'source': 'RIA Новости'
-                        })
                 except Exception as e:
-                    logger.warning(f"Ошибка парсинга RIA: {e}")
                     continue
             
+            logger.info(f"✅ RIA: получено {len(news_items)} новостей")
             return news_items
+            
         except Exception as e:
-            logger.error(f"Ошибка RIA: {e}")
+            logger.error(f"❌ Ошибка RIA: {e}")
             return []
     
     def parse_tass_news(self, max_news: int = 5) -> list:
-        """Парсинг новостей с TASS.ru - официальное агентство"""
+        """Парсинг новостей с TASS.ru"""
         try:
             url = "https://tass.ru/"
-            response = requests.get(url, headers=self.headers, timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            response = requests.get(url, headers=self.headers, timeout=15)
+            response.raise_for_status()
             
+            soup = BeautifulSoup(response.text, 'html.parser')
             news_items = []
-            articles = soup.select('.news-line__item, .news-card')[:max_news]
+            
+            articles = soup.select('.news-card, .news-line__item, [data-io-article-url]')[:max_news*2]
             
             for article in articles:
                 try:
-                    title_elem = article.select_one('.news-line__item-title, .news-card__title')
-                    if title_elem:
-                        title = title_elem.get_text(strip=True)
-                        link_elem = article.find('a')
-                        link = link_elem.get('href', '') if link_elem else ''
+                    title_elem = article.select_one('.news-card__title, .news-line__item-title, h3')
+                    if not title_elem:
+                        continue
+                    
+                    title = title_elem.get_text(strip=True)
+                    if len(title) < 10:
+                        continue
+                    
+                    link_elem = article.find('a', href=True)
+                    if link_elem:
+                        link = link_elem['href']
                         if link and not link.startswith('http'):
                             link = 'https://tass.ru' + link
+                    else:
+                        # Пробуем получить ссылку из data-атрибута
+                        link = article.get('data-io-article-url', '')
+                        if link and not link.startswith('http'):
+                            link = 'https://tass.ru' + link
+                    
+                    if not link:
+                        continue
+                    
+                    news_items.append({
+                        'title': title[:150],
+                        'link': link,
+                        'source': 'ТАСС'
+                    })
+                    
+                    if len(news_items) >= max_news:
+                        break
                         
-                        news_items.append({
-                            'title': title,
-                            'link': link,
-                            'source': 'ТАСС'
-                        })
                 except Exception as e:
-                    logger.warning(f"Ошибка парсинга ТАСС: {e}")
                     continue
             
+            logger.info(f"✅ ТАСС: получено {len(news_items)} новостей")
             return news_items
+            
         except Exception as e:
-            logger.error(f"Ошибка ТАСС: {e}")
+            logger.error(f"❌ Ошибка ТАСС: {e}")
             return []
     
     def parse_belpressa_news(self, max_news: int = 5) -> list:
         """Парсинг новостей Белгорода с Belpressa.ru"""
         try:
             url = "https://www.belpressa.ru/news/"
-            response = requests.get(url, headers=self.headers, timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            response = requests.get(url, headers=self.headers, timeout=15)
+            response.raise_for_status()
             
+            soup = BeautifulSoup(response.text, 'html.parser')
             news_items = []
-            articles = soup.select('.news-list-item, .news-item')[:max_news]
+            
+            # Универсальные селекторы
+            articles = soup.select('.news-item, article, .item, .news-list__item')[:max_news*3]
             
             for article in articles:
                 try:
-                    title_elem = article.select_one('h2, .news-title, .title')
-                    if title_elem:
-                        title = title_elem.get_text(strip=True)
-                        link_elem = article.find('a')
-                        link = link_elem.get('href', '') if link_elem else ''
+                    title_elem = article.select_one('h2, h3, .title, .news-title')
+                    if not title_elem:
+                        continue
+                    
+                    title = title_elem.get_text(strip=True)
+                    if len(title) < 15:
+                        continue
+                    
+                    link_elem = article.find('a', href=True)
+                    if link_elem:
+                        link = link_elem['href']
                         if link and not link.startswith('http'):
                             link = 'https://www.belpressa.ru' + link
+                    else:
+                        continue
+                    
+                    news_items.append({
+                        'title': title[:200],
+                        'link': link,
+                        'source': 'БелПресса'
+                    })
+                    
+                    if len(news_items) >= max_news:
+                        break
                         
-                        news_items.append({
-                            'title': title,
-                            'link': link,
-                            'source': 'БелПресса'
-                        })
                 except Exception as e:
-                    logger.warning(f"Ошибка парсинга БелПресса: {e}")
                     continue
             
+            # Резервный метод поиска
+            if not news_items:
+                all_links = soup.find_all('a', href=True)
+                news_count = 0
+                for link in all_links:
+                    href = link['href']
+                    if '/news/' in href and any(x in href for x in ['2024', '2025']):
+                        title = link.get_text(strip=True)
+                        if title and len(title) > 20:
+                            full_link = href if href.startswith('http') else 'https://www.belpressa.ru' + href
+                            news_items.append({
+                                'title': title[:200],
+                                'link': full_link,
+                                'source': 'БелПресса'
+                            })
+                            news_count += 1
+                            if news_count >= max_news:
+                                break
+            
+            logger.info(f"✅ БелПресса: получено {len(news_items)} новостей")
             return news_items
+            
         except Exception as e:
-            logger.error(f"Ошибка БелПресса: {e}")
+            logger.error(f"❌ Ошибка БелПресса: {e}")
             return []
     
     def parse_belru_news(self, max_news: int = 5) -> list:
         """Парсинг новостей Белгорода с Bel.ru"""
         try:
-            url = "https://www.bel.ru/news/"
-            response = requests.get(url, headers=self.headers, timeout=10)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            url = "https://bel.ru/news/"
+            response = requests.get(url, headers=self.headers, timeout=15)
+            response.raise_for_status()
             
+            soup = BeautifulSoup(response.text, 'html.parser')
             news_items = []
-            articles = soup.select('.news-item, .article-item')[:max_news]
+            
+            articles = soup.select('.news-item, article, .item, [class*="news"]')[:max_news*3]
             
             for article in articles:
                 try:
-                    title_elem = article.select_one('.news-title, .title, h3')
-                    if title_elem:
-                        title = title_elem.get_text(strip=True)
-                        link_elem = article.find('a')
-                        link = link_elem.get('href', '') if link_elem else ''
+                    title_elem = article.select_one('h1, h2, h3, h4, .title, .news-title')
+                    if not title_elem:
+                        continue
+                    
+                    title = title_elem.get_text(strip=True)
+                    if len(title) < 15:
+                        continue
+                    
+                    link_elem = article.find('a', href=True)
+                    if link_elem:
+                        link = link_elem['href']
                         if link and not link.startswith('http'):
-                            link = 'https://www.bel.ru' + link
+                            link = 'https://bel.ru' + link
+                    else:
+                        continue
+                    
+                    news_items.append({
+                        'title': title[:200],
+                        'link': link,
+                        'source': 'Бел.Ру'
+                    })
+                    
+                    if len(news_items) >= max_news:
+                        break
                         
-                        news_items.append({
-                            'title': title,
-                            'link': link,
-                            'source': 'Бел.Ру'
-                        })
                 except Exception as e:
-                    logger.warning(f"Ошибка парсинга Бел.Ру: {e}")
+                    continue
+            
+            logger.info(f"✅ Бел.Ру: получено {len(news_items)} новостей")
+            return news_items
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка Бел.Ру: {e}")
+            return []
+    
+    def parse_alternative_belgorod_news(self, max_news: int = 5) -> list:
+        """Резервные источники новостей Белгорода"""
+        try:
+            news_items = []
+            
+            # Альтернативный источник - региональные новости
+            alternative_sources = [
+                {
+                    'url': 'https://www.belnovosti.ru/',
+                    'source': 'БелНовости',
+                    'base': 'https://www.belnovosti.ru'
+                }
+            ]
+            
+            for source in alternative_sources:
+                try:
+                    response = requests.get(source['url'], headers=self.headers, timeout=10)
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # Ищем новости по ключевым словам
+                    all_links = soup.find_all('a', href=True)
+                    for link in all_links:
+                        href = link['href']
+                        title = link.get_text(strip=True)
+                        
+                        if (title and len(title) > 20 and 
+                            any(word in title.lower() for word in ['белгород', 'област', 'город', 'новост'])):
+                            
+                            full_link = href if href.startswith('http') else source['base'] + href
+                            news_items.append({
+                                'title': title[:150],
+                                'link': full_link,
+                                'source': source['source']
+                            })
+                            
+                            if len(news_items) >= max_news:
+                                break
+                                
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка альтернативного источника {source['source']}: {e}")
                     continue
             
             return news_items
+            
         except Exception as e:
-            logger.error(f"Ошибка Бел.Ру: {e}")
+            logger.error(f"❌ Ошибка альтернативных источников: {e}")
             return []
 
 # Создаем экземпляр парсера
@@ -179,17 +315,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🇷🇺 Федеральные новости", callback_data="federal_news")],
         [InlineKeyboardButton("🏙️ Новости Белгорода", callback_data="belgorod_news")],
-        [InlineKeyboardButton("🔄 Обновить новости", callback_data="refresh_news")],
-        [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
+        [InlineKeyboardButton("🔄 Обновить", callback_data="refresh_news"),
+         InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
-        "📰 *Добро пожаловать в Новостной Бот!*\n\n"
-        "Я предоставляю актуальные новости:\n"
-        "• 🇷🇺 Федеральные новости России\n"
+    user = update.effective_user
+    welcome_text = (
+        f"👋 Привет, {user.first_name}!\n\n"
+        "📰 *Я ваш новостной бот*\n\n"
+        "Я помогу вам быть в курсе последних событий:\n"
+        "• 🇷🇺 Федеральные новости России\n" 
         "• 🏙️ Новости Белгорода и области\n\n"
-        "Выберите категорию новостей:",
+        "Выберите категорию:"
+    )
+    
+    await update.message.reply_text(
+        welcome_text,
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
@@ -199,17 +341,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "ℹ️ *Помощь по боту*\n\n"
         "*Основные команды:*\n"
-        "/start - начать работу с ботом\n"
-        "/news - получить свежие новости\n"
+        "/start - начать работу\n"
+        "/news - получить новости\n"
         "/help - эта справка\n\n"
         "*Источники новостей:*\n"
-        "• RIA Новости\n"
-        "• ТАСС\n"
-        "• БелПресса\n"
-        "• Бел.Ру\n\n"
-        "🔄 Новости обновляются при каждом запросе"
+        "• RIA Новости - федеральные\n"
+        "• ТАСС - федеральные\n" 
+        "• БелПресса - Белгород\n"
+        "• Бел.Ру - Белгород\n\n"
+        "📞 *Поддержка:* @Alex_De_White"
     )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    
+    keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data="refresh_news")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        help_text,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка команды /news"""
@@ -243,24 +393,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_federal_news(query):
     """Отправка федеральных новостей"""
-    await query.edit_message_text("📡 Загружаю федеральные новости...")
+    await query.edit_message_text("📡 *Загружаю федеральные новости...*", parse_mode='Markdown')
     
-    # Парсим новости из нескольких источников
-    ria_news = news_parser.parse_ria_news(3)
-    tass_news = news_parser.parse_tass_news(3)
+    # Парсим новости асинхронно
+    ria_news = await asyncio.get_event_loop().run_in_executor(None, news_parser.parse_ria_news, 4)
+    tass_news = await asyncio.get_event_loop().run_in_executor(None, news_parser.parse_tass_news, 4)
     
     all_news = ria_news + tass_news
     
     if not all_news:
-        message = "❌ Не удалось загрузить федеральные новости. Попробуйте позже."
+        message = (
+            "❌ *Не удалось загрузить федеральные новости*\n\n"
+            "Попробуйте:\n"
+            "• Проверить интернет-соединение\n" 
+            "• Попробовать позже\n"
+            "• Написать в поддержку @Alex_De_White"
+        )
     else:
         message = "🇷🇺 *ФЕДЕРАЛЬНЫЕ НОВОСТИ*\n\n"
-        for i, news in enumerate(all_news[:6], 1):  # Ограничиваем 6 новостями
-            message += f"{i}. [{news['source']}] {news['title']}\n"
-            message += f"   🔗 [Читать]({news['link']})\n\n"
+        for i, news in enumerate(all_news[:6], 1):
+            message += f"*{i}. {news['source']}*\n"
+            message += f"{news['title']}\n"
+            message += f"[Читать]({news['link']})\n\n"
     
     keyboard = [
         [InlineKeyboardButton("🔄 Обновить", callback_data="federal_news")],
+        [InlineKeyboardButton("🏙️ Новости Белгорода", callback_data="belgorod_news")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="refresh_news")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -273,25 +431,43 @@ async def send_federal_news(query):
     )
 
 async def send_belgorod_news(query):
-    """Отправка новостей Белгорода"""
-    await query.edit_message_text("📡 Загружаю новости Белгорода...")
+    """Отправка новостей Белгорода с резервными источниками"""
+    await query.edit_message_text("📡 *Загружаю новости Белгорода...*", parse_mode='Markdown')
     
-    # Парсим новости из белгородских источников
-    belpressa_news = news_parser.parse_belpressa_news(4)
-    belru_news = news_parser.parse_belru_news(4)
+    # Парсим основные источники
+    belpressa_news = await asyncio.get_event_loop().run_in_executor(None, news_parser.parse_belpressa_news, 3)
+    belru_news = await asyncio.get_event_loop().run_in_executor(None, news_parser.parse_belru_news, 3)
     
     all_news = belpressa_news + belru_news
     
+    # Если основные источники не дали результатов, используем резервные
     if not all_news:
-        message = "❌ Не удалось загрузить новости Белгорода. Попробуйте позже."
+        await query.edit_message_text("📡 *Ищу альтернативные источники...*", parse_mode='Markdown')
+        alternative_news = await asyncio.get_event_loop().run_in_executor(None, news_parser.parse_alternative_belgorod_news, 6)
+        all_news = alternative_news
+    
+    if not all_news:
+        message = (
+            "❌ *Не удалось загрузить новости Белгорода*\n\n"
+            "Возможные причины:\n"
+            "• Сайты временно недоступны\n"
+            "• Изменилась структура сайтов\n"
+            "• Проблемы с подключением\n\n"
+            "Попробуйте позже или проверьте федеральные новости 🇷🇺"
+        )
     else:
         message = "🏙️ *НОВОСТИ БЕЛГОРОДА И ОБЛАСТИ*\n\n"
-        for i, news in enumerate(all_news[:8], 1):  # Ограничиваем 8 новостями
-            message += f"{i}. [{news['source']}] {news['title']}\n"
-            message += f"   🔗 [Читать]({news['link']})\n\n"
+        for i, news in enumerate(all_news[:6], 1):
+            message += f"*{i}. {news['source']}*\n"
+            message += f"{news['title']}\n"
+            message += f"[Читать]({news['link']})\n\n"
+        
+        if not belpressa_news and not belru_news:
+            message += "⚠️ *Используются альтернативные источники*\n"
     
     keyboard = [
         [InlineKeyboardButton("🔄 Обновить", callback_data="belgorod_news")],
+        [InlineKeyboardButton("🇷🇺 Федеральные новости", callback_data="federal_news")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="refresh_news")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -308,7 +484,8 @@ async def refresh_news_menu(query):
     keyboard = [
         [InlineKeyboardButton("🇷🇺 Федеральные новости", callback_data="federal_news")],
         [InlineKeyboardButton("🏙️ Новости Белгорода", callback_data="belgorod_news")],
-        [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
+        [InlineKeyboardButton("🔄 Обновить", callback_data="refresh_news"),
+         InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -326,16 +503,20 @@ async def show_help(query):
         "*Источники новостей:*\n"
         "• RIA Новости - федеральные\n"
         "• ТАСС - федеральные\n"
-        "• БелПресса - Белгород\n"
+        "• БелПресса - Белгород\n" 
         "• Бел.Ру - Белгород\n\n"
         "*Как использовать:*\n"
         "1. Выберите категорию новостей\n"
         "2. Нажмите на ссылку для чтения\n"
         "3. Используйте '🔄 Обновить' для актуальных новостей\n\n"
-        "📞 Поддержка: @Alex_De_White"
+        "📞 *Поддержка:* @Alex_De_White"
     )
     
-    keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data="refresh_news")]]
+    keyboard = [
+        [InlineKeyboardButton("🇷🇺 Федеральные новости", callback_data="federal_news")],
+        [InlineKeyboardButton("🏙️ Новости Белгорода", callback_data="belgorod_news")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="refresh_news")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
@@ -353,20 +534,23 @@ async def webhook(request: Request) -> Response:
         await application.update_queue.put(update)
         return Response()
     except Exception as e:
-        logger.error(f"Ошибка в вебхуке: {e}")
+        logger.error(f"❌ Ошибка в вебхуке: {e}")
         return Response(status_code=500)
 
 async def health_check(request: Request) -> PlainTextResponse:
     """Эндпоинт для проверки здоровья приложения"""
-    return PlainTextResponse("OK")
+    return PlainTextResponse("✅ Бот работает")
 
 async def set_webhook():
     """Установка вебхука при запуске"""
     if WEBHOOK_URL:
-        await application.bot.set_webhook(url=f"{WEBHOOK_URL}")
-        logger.info(f"Вебхук установлен: {WEBHOOK_URL}")
+        try:
+            await application.bot.set_webhook(url=f"{WEBHOOK_URL}")
+            logger.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка установки вебхука: {e}")
     else:
-        logger.warning("RENDER_EXTERNAL_URL не установлен, вебхук не настроен")
+        logger.warning("⚠️ RENDER_EXTERNAL_URL не установлен, вебхук не настроен")
 
 # ===== РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ =====
 def setup_handlers():
@@ -407,7 +591,9 @@ async def main():
     )
     server = uvicorn.Server(config)
     
-    logger.info(f"🤖 Новостной бот запущен на порту {PORT}")
+    logger.info(f"✅ Новостной бот запущен на порту {PORT}")
+    logger.info("🤖 Бот готов к работе!")
+    
     await server.serve()
 
 if __name__ == "__main__":
